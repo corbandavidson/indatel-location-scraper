@@ -131,40 +131,57 @@ if ($Publish) {
 
     Set-Location $Root
 
+    # git/gh write informational text to stderr (e.g. "Everything up-to-date").
+    # Under ErrorActionPreference=Stop, PowerShell treats those as terminating
+    # errors. We merge stderr into stdout for these commands and gate on
+    # $LASTEXITCODE instead.
+    function Invoke-Native {
+        param([string]$Label, [scriptblock]$Block)
+        $out = & $Block 2>&1
+        $code = $LASTEXITCODE
+        if ($out) { $out | ForEach-Object { Write-Host $_ } }
+        if ($code -ne 0) {
+            throw "$Label failed (exit $code)"
+        }
+    }
+
     # Stage the version bump (if any) and commit
-    git add ai_version/version.py
-    $dirty = git status --porcelain
+    Invoke-Native "git add" { git add ai_version/version.py }
+    $dirty = (& git status --porcelain) 2>&1
     if ($dirty) {
-        git commit -m "Release v$Version"
-        if ($LASTEXITCODE -ne 0) { throw "git commit failed" }
+        Invoke-Native "git commit" { git commit -m "Release v$Version" }
     } else {
         Write-Host "No version.py change to commit"
     }
 
     # Tag locally — if the tag already exists (re-publish), don't fail
-    $existingTag = git tag -l "v$Version"
+    $existingTag = (& git tag -l "v$Version") 2>&1
     if (-not $existingTag) {
-        git tag "v$Version"
+        Invoke-Native "git tag" { git tag "v$Version" }
     }
 
-    git push origin main
-    if ($LASTEXITCODE -ne 0) { throw "git push (main) failed" }
-    git push origin "v$Version"
-    if ($LASTEXITCODE -ne 0) { throw "git push (tag) failed" }
+    Invoke-Native "git push main"   { git push origin main }
+    Invoke-Native "git push tag"    { git push origin "v$Version" }
 
-    # Create the release. Use a heredoc-ish here-string for notes.
-    $notes = @"
+    # Skip release creation if a release for this tag already exists
+    $existingRelease = & gh release view "v$Version" 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Release v$Version already exists — uploading installer as asset"
+        Invoke-Native "gh release upload" {
+            gh release upload "v$Version" $InstallerOutput --clobber
+        }
+    } else {
+        $notes = @"
 **Location Scraper AI v$Version**
 
 Download the installer below and run it. Per-user install, no admin required.
 
 The app checks GitHub on launch — running an older version, you'll see an update notice in the sidebar.
 "@
-    gh release create "v$Version" `
-        --title "v$Version" `
-        --notes $notes `
-        $InstallerOutput
-    if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+        Invoke-Native "gh release create" {
+            gh release create "v$Version" --title "v$Version" --notes $notes $InstallerOutput
+        }
+    }
 
     Write-Host ""
     Write-Host "Published v$Version" -ForegroundColor Green
