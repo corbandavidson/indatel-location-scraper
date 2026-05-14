@@ -37,7 +37,7 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 
 OutputDir=Output
-OutputBaseFilename=LocationScraperAI-Setup-{#MyAppVersion}
+OutputBaseFilename=LocationScraperAI-Installer-{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

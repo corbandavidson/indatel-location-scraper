@@ -52,7 +52,7 @@ $IscPath          = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 $IssFile          = Join-Path $Root "installer\LocationScraperAI.iss"
 $DistFolder       = Join-Path $Root "dist\LocationScraperAI"
 $DistAppFolder    = Join-Path $DistFolder "app"
-$InstallerOutput  = Join-Path $Root "installer\Output\LocationScraperAI-Setup-$Version.exe"
+$InstallerOutput  = Join-Path $Root "installer\Output\LocationScraperAI-Installer-$Version.exe"
 
 function Write-Step($msg) {
     Write-Host ""
