@@ -19,6 +19,69 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 
+# Local — single source of truth for the app version
+_HERE_FOR_VER = Path(__file__).resolve().parent
+if str(_HERE_FOR_VER) not in sys.path:
+    sys.path.insert(0, str(_HERE_FOR_VER))
+from version import __version__, GITHUB_REPO
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_latest_release() -> dict:
+    """
+    Ask GitHub for the latest release of this app. Cached for an hour so we
+    don't hammer the API on every Streamlit rerun. Returns {} on any failure
+    so the rest of the UI silently moves on.
+    """
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "LocationScraperAI",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return {}
+    tag = (data.get("tag_name") or "").lstrip("v").strip()
+    if not tag:
+        return {}
+    return {
+        "version": tag,
+        "url": data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases",
+    }
+
+
+def _version_tuple(v: str) -> tuple:
+    """Parse '1.2.3' into (1,2,3). Non-numeric segments collapse to 0 so a
+    malformed tag never makes us claim an update is available."""
+    out = []
+    for part in v.split("."):
+        try:
+            out.append(int(part))
+        except ValueError:
+            out.append(0)
+    return tuple(out)
+
+
+def check_for_update() -> tuple[bool, str, str]:
+    """Returns (update_available, latest_version, release_url)."""
+    latest = _fetch_latest_release()
+    if not latest:
+        return False, "", ""
+    latest_v = latest.get("version", "")
+    if not latest_v:
+        return False, "", ""
+    return (
+        _version_tuple(latest_v) > _version_tuple(__version__),
+        latest_v,
+        latest.get("url", ""),
+    )
+
 
 # ── Persistent settings ───────────────────────────────────────────────
 
@@ -398,6 +461,15 @@ with st.sidebar:
     - With AI enabled, new/unknown chains usually work first try
     - Large chains (1000+ locations) may take 1-2 minutes
     """)
+
+    st.markdown("---")
+    _update_available, _latest_v, _release_url = check_for_update()
+    if _update_available and _release_url:
+        st.warning(
+            f"**Update available:** v{_latest_v}\n\n"
+            f"[Download new installer]({_release_url})"
+        )
+    st.caption(f"v{__version__}  •  INDATEL Labs")
 
 
 # ── Main content ──────────────────────────────────────────────────────
