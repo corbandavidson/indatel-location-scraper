@@ -13,6 +13,7 @@ import logging
 import io
 import os
 import json
+import html as html_mod
 from datetime import datetime
 from pathlib import Path
 
@@ -290,7 +291,7 @@ for key, default in [
 
 class StreamlitLogHandler(logging.Handler):
     def emit(self, record):
-        msg = self.format(record)
+        msg = html_mod.escape(self.format(record))
         css = {"INFO": "log-info", "WARNING": "log-warning", "ERROR": "log-error"}.get(record.levelname, "")
         st.session_state.log_lines.append(f'<span class="{css}">{msg}</span>')
         if len(st.session_state.log_lines) > 200:
@@ -328,7 +329,8 @@ def build_planner() -> Planner | None:
 
 # ── Runner ────────────────────────────────────────────────────────────
 
-def run_scraper(companies, progress_bar, status_text, manual_url=None):
+def run_scraper(companies, progress_bar, status_text, counter_text=None,
+                manual_url=None, output_fmt="both"):
     setup_ui_logging()
     logger = logging.getLogger("main")
     st.session_state.log_lines = []
@@ -340,7 +342,17 @@ def run_scraper(companies, progress_bar, status_text, manual_url=None):
         logger.info("AI planner enabled")
 
     all_locations, errors = [], []
+    companies_done = 0
     start_time = time.time()
+    total = len(companies)
+
+    def _update_counter():
+        if counter_text is None:
+            return
+        counter_text.markdown(
+            f"**{len(all_locations):,}** locations found &nbsp;·&nbsp; "
+            f"**{companies_done}** / **{total}** companies done"
+        )
 
     def progress_callback(step, company, detail=""):
         labels = {
@@ -348,6 +360,7 @@ def run_scraper(companies, progress_bar, status_text, manual_url=None):
             "rendering": "Rendering page",
             "extracting": "Extracting locations",
             "cleaning": "Cleaning & normalizing",
+            "validating": "Validating results",
         }
         label = labels.get(step, step)
         if detail:
@@ -356,7 +369,8 @@ def run_scraper(companies, progress_bar, status_text, manual_url=None):
             status_text.markdown(f"**{company}** — {label}")
 
     for i, company in enumerate(companies):
-        progress_bar.progress(i / len(companies), text=f"Processing {i+1}/{len(companies)}: {company}")
+        pct = int(i / total * 100)
+        progress_bar.progress(i / total, text=f"{pct}% — Processing {i+1}/{total}: {company}")
         try:
             locs = scrape_company_ai(company, planner=planner, manual_url=manual_url,
                                      progress_callback=progress_callback)
@@ -367,12 +381,15 @@ def run_scraper(companies, progress_bar, status_text, manual_url=None):
             logger.error("[%s] Error: %s", company, e)
             errors.append((company, str(e)))
 
-        if i < len(companies) - 1:
+        companies_done += 1
+        _update_counter()
+
+        if i < total - 1:
             delay = random.uniform(LONG_DELAY_MIN, LONG_DELAY_MAX) if (i + 1) % LONG_DELAY_EVERY_N == 0 \
                 else random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX)
             time.sleep(delay)
 
-    progress_bar.progress(1.0, text="Complete")
+    progress_bar.progress(1.0, text="100% — Complete")
     elapsed = time.time() - start_time
 
     st.session_state.run_stats = {
@@ -390,7 +407,7 @@ def run_scraper(companies, progress_bar, status_text, manual_url=None):
                 df[col] = ""
         st.session_state.results = df[COLUMNS]
         base_name = f"locations_ai_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        export_results(all_locations, "both", base_name)
+        export_results(all_locations, output_fmt, base_name)
     else:
         st.session_state.results = pd.DataFrame()
 
@@ -438,16 +455,36 @@ with st.sidebar:
             key="output_format_input",
         )
 
+        model_options = [
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+        ]
+        try:
+            model_idx = model_options.index(st.session_state.gemini_model)
+        except ValueError:
+            model_idx = 0
+        model_input = st.selectbox(
+            "AI Model",
+            model_options,
+            index=model_idx,
+            key="gemini_model_input",
+            help="Which Gemini model to use. Flash is recommended for speed and cost.",
+        )
+
         # Auto-persist when anything changed
         if (
             key_input != st.session_state.ai_key
             or format_input != st.session_state.output_format
+            or model_input != st.session_state.gemini_model
         ):
             st.session_state.ai_key = key_input
             st.session_state.output_format = format_input
+            st.session_state.gemini_model = model_input
             save_settings({
                 "gemini_api_key": key_input,
-                "gemini_model": st.session_state.gemini_model,
+                "gemini_model": model_input,
                 "output_format": format_input,
             })
 
@@ -479,7 +516,7 @@ with st.sidebar:
 
 # ── Main content ──────────────────────────────────────────────────────
 
-tab_single, tab_batch = st.tabs(["Single Company", "Batch (Excel Upload)"])
+tab_single, tab_batch = st.tabs(["Single Company", "Batch (Excel / CSV Upload)"])
 
 with tab_single:
     with st.form(key="single_form", clear_on_submit=False, border=False):
@@ -503,21 +540,37 @@ with tab_single:
 
 with tab_batch:
     uploaded_file = st.file_uploader(
-        "Upload Excel file with company names in the first column",
-        type=["xlsx"], key="batch_upload",
+        "Upload an Excel or CSV file with company names in the first column",
+        type=["xlsx", "csv"], key="batch_upload",
     )
     companies_from_file = []
     if uploaded_file:
-        from openpyxl import load_workbook
-        wb = load_workbook(io.BytesIO(uploaded_file.read()), read_only=True)
-        ws = wb.active
-        for row in ws.iter_rows(min_row=1, max_col=1, values_only=True):
-            v = row[0]
-            if v and isinstance(v, str):
-                vc = v.strip()
-                if vc and vc.lower() not in ("company", "company_name", "name", "company name"):
-                    companies_from_file.append(vc)
-        wb.close()
+        _HEADER_WORDS = {"company", "company_name", "name", "company name"}
+        fname = (uploaded_file.name or "").lower()
+        try:
+            if fname.endswith(".csv"):
+                import csv as csv_mod
+                raw = uploaded_file.read().decode("utf-8-sig")
+                reader = csv_mod.reader(io.StringIO(raw))
+                for row in reader:
+                    if row:
+                        v = (row[0] or "").strip()
+                        if v and v.lower() not in _HEADER_WORDS:
+                            companies_from_file.append(v)
+            else:
+                from openpyxl import load_workbook
+                wb = load_workbook(io.BytesIO(uploaded_file.read()), read_only=True)
+                ws = wb.active
+                for row in ws.iter_rows(min_row=1, max_col=1, values_only=True):
+                    v = row[0]
+                    if v and isinstance(v, str):
+                        vc = v.strip()
+                        if vc and vc.lower() not in _HEADER_WORDS:
+                            companies_from_file.append(vc)
+                wb.close()
+        except Exception as e:
+            st.error(f"Could not read the uploaded file: {e}")
+            companies_from_file = []
         if companies_from_file:
             st.success(f"Found **{len(companies_from_file)}** companies: {', '.join(companies_from_file[:10])}")
             if len(companies_from_file) > 10:
@@ -565,12 +618,19 @@ if companies_to_scrape:
     st.markdown("### Scraping Progress")
     progress_bar = st.progress(0, text="Starting...")
     status_text = st.empty()
+    counter_text = st.empty()
+
+    fmt_map = {"Both (CSV + Excel)": "both", "CSV Only": "csv", "Excel Only": "excel"}
+    chosen_fmt = fmt_map.get(output_format, "both")
 
     with st.spinner(""):
-        run_scraper(companies_to_scrape, progress_bar, status_text, manual_url=single_manual_url)
+        run_scraper(companies_to_scrape, progress_bar, status_text,
+                    counter_text=counter_text,
+                    manual_url=single_manual_url, output_fmt=chosen_fmt)
 
     st.session_state.is_running = False
     status_text.empty()
+    counter_text.empty()
 
 
 # ── Results display ───────────────────────────────────────────────────

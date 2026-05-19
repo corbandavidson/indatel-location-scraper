@@ -166,13 +166,12 @@ def _validate_locations(cleaned: list[dict], expected: dict | None) -> tuple[boo
     return True, ""
 
 
-def _run_strategy(name: str, render_result, company: str, planner: Planner | None) -> list[dict]:
+def _run_strategy(name: str, render_result, company: str, planner: Planner | None,
+                  dir_progress=None) -> list[dict]:
     """Execute one named extraction strategy and return raw locations."""
     html = render_result.html
     url = render_result.final_url
 
-    # Don't dispatch URL-based strategies if the URL is unusable
-    # (e.g. chrome-error:// after a navigation failure).
     url_is_real = url and not url.startswith(("chrome-error://", "about:", "data:"))
 
     if name == "jsonld":
@@ -184,7 +183,7 @@ def _run_strategy(name: str, render_result, company: str, planner: Planner | Non
     if name == "directory_tree":
         if not url_is_real:
             return []
-        return extract_from_directory_tree(html, url)
+        return extract_from_directory_tree(html, url, progress_cb=dir_progress)
     if name == "sitemap":
         if not url_is_real:
             return []
@@ -196,7 +195,8 @@ def _run_strategy(name: str, render_result, company: str, planner: Planner | Non
     return []
 
 
-def _try_all_strategies(render_result, company: str, planner: Planner | None) -> list[dict]:
+def _try_all_strategies(render_result, company: str, planner: Planner | None,
+                        dir_progress=None) -> list[dict]:
     """
     Run every cheap strategy in turn — JSON-LD, embedded JSON, API sniff,
     HTML cards, directory tree, sitemap — and return the first non-empty
@@ -223,7 +223,7 @@ def _try_all_strategies(render_result, company: str, planner: Planner | None) ->
             return locations
 
     if url_is_real:
-        locations = extract_from_directory_tree(html, url)
+        locations = extract_from_directory_tree(html, url, progress_cb=dir_progress)
         if locations:
             logger.info("[%s] Directory tree: %d", company, len(locations))
             return locations
@@ -281,6 +281,14 @@ def scrape_company_ai(
 
     logger.info("[%s] Using URL (%s): %s", company_name, method, url)
 
+    def _dir_progress(phase, current, total):
+        if not total:
+            return
+        pct = int(current / total * 100)
+        labels = {"estimate": "estimated total", "states": "states",
+                  "cities": "cities", "stores": "stores"}
+        step("extracting", f"crawling {labels.get(phase, phase)}: {current:,}/{total:,} ({pct}%)")
+
     # ── Step 2: render ───────────────────────────────────────────────
     time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
     step("rendering", url)
@@ -326,13 +334,15 @@ def scrape_company_ai(
         if strategy:
             logger.info("[%s] LLM picked strategy: %s", company_name, strategy)
             step("extracting", f"strategy: {strategy}")
-            locations = _run_strategy(strategy, result, company_name, planner)
+            locations = _run_strategy(strategy, result, company_name, planner,
+                                     dir_progress=_dir_progress)
             logger.info("[%s] %s yielded %d raw", company_name, strategy, len(locations))
 
     # ── Step 4: legacy multi-strategy as safety net ──────────────────
     if len(locations) < _MIN_PLAUSIBLE:
         step("extracting", "running legacy multi-strategy")
-        legacy = _try_all_strategies(result, company_name, planner)
+        legacy = _try_all_strategies(result, company_name, planner,
+                                     dir_progress=_dir_progress)
         if len(legacy) > len(locations):
             locations = legacy
 
@@ -342,7 +352,8 @@ def scrape_company_ai(
         time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
         pw = render_page(url, force_playwright=True)
         if pw:
-            locations = _try_all_strategies(pw, company_name, planner)
+            locations = _try_all_strategies(pw, company_name, planner,
+                                             dir_progress=_dir_progress)
             result = pw
 
     # ── Step 6: LLM last-resort extraction ───────────────────────────
@@ -391,7 +402,8 @@ def scrape_company_ai(
                 retry_result = render_stealth(alt_url)
             if retry_result is not None and not _render_is_blocked(retry_result):
                 step("extracting", "retry: multi-strategy")
-                retry_locs = _try_all_strategies(retry_result, company_name, planner)
+                retry_locs = _try_all_strategies(retry_result, company_name, planner,
+                                                 dir_progress=_dir_progress)
                 if not retry_locs and planner is not None:
                     retry_locs = planner.extract_stores_from_html(
                         retry_result.html, retry_result.final_url,
