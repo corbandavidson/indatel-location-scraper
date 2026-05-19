@@ -1183,10 +1183,56 @@ def extract_locations(render_result: RenderResult, company_name: str, progress_c
 
 # ─── Strategy 6: Direct API probing ──────────────────────────────────
 
+_US_STATE_CODES = [
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN",
+    "IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV",
+    "NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN",
+    "TX","UT","VT","VA","WA","WV","WI","WY","DC",
+]
+
+
+def _try_json_get(url: str, headers: dict) -> dict | list | None:
+    """GET a URL, return parsed JSON or None."""
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return None
+        ct = resp.headers.get("Content-Type", "")
+        if "json" not in ct and "javascript" not in ct:
+            return None
+        return resp.json()
+    except Exception:
+        return None
+
+
+def _extract_from_json(data, source_url: str) -> list[dict]:
+    """Pull location dicts out of an arbitrary JSON structure."""
+    locations = []
+    arrays = _find_location_arrays(data)
+    if not arrays and isinstance(data, dict):
+        for key in ["results", "data", "locations", "stores", "items",
+                    "response", "features", "records", "rows", "payload"]:
+            wrapped = data.get(key)
+            if isinstance(wrapped, list) and _looks_like_location_list(wrapped):
+                arrays = [wrapped]
+                break
+            if isinstance(wrapped, dict):
+                arrays = _find_location_arrays(wrapped)
+                if arrays:
+                    break
+    for arr in arrays:
+        for item in arr:
+            loc = _parse_location_dict(item, source_url)
+            if loc:
+                locations.append(loc)
+    return locations
+
+
 def probe_direct_apis(base_url: str, company_name: str) -> list[dict]:
     """
     Try common API endpoint patterns directly via HTTP, without needing
-    Playwright to discover them.
+    Playwright to discover them. Includes state-iteration for directory
+    APIs that accept a state parameter.
     """
     from urllib.parse import urlparse
     logger.info("Strategy 6: Probing common API endpoints for '%s'", company_name)
@@ -1220,7 +1266,9 @@ def probe_direct_apis(base_url: str, company_name: str) -> list[dict]:
         "/wp-json/locations/v1/all",
         "/wp-json/wp/v2/locations?per_page=100",
         "/_api/locations",
-        "/graphql",  # Will need POST handling
+        "/store/electrode/api/store-directory",
+        "/locations/location-search-ajax",
+        "/graphql",
     ]
 
     # Also try paths relative to the current URL path
@@ -1239,38 +1287,11 @@ def probe_direct_apis(base_url: str, company_name: str) -> list[dict]:
         url = f"{domain}{path}"
         try:
             time.sleep(random.uniform(0.5, 1.5))
-            resp = requests.get(url, headers=headers, timeout=10)
-
-            if resp.status_code != 200:
+            data = _try_json_get(url, headers)
+            if data is None:
                 continue
 
-            content_type = resp.headers.get("Content-Type", "")
-            if "json" not in content_type and "javascript" not in content_type:
-                continue
-
-            try:
-                data = resp.json()
-            except ValueError:
-                continue
-
-            arrays = _find_location_arrays(data)
-            if not arrays and isinstance(data, dict):
-                for key in ["results", "data", "locations", "stores", "items",
-                            "response", "features", "records", "rows"]:
-                    wrapped = data.get(key)
-                    if isinstance(wrapped, list) and _looks_like_location_list(wrapped):
-                        arrays = [wrapped]
-                        break
-                    if isinstance(wrapped, dict):
-                        arrays = _find_location_arrays(wrapped)
-                        if arrays:
-                            break
-
-            for arr in arrays:
-                for item in arr:
-                    loc = _parse_location_dict(item, url)
-                    if loc:
-                        locations.append(loc)
+            locations = _extract_from_json(data, url)
 
             if locations:
                 logger.info("Direct API probe found %d locations at %s", len(locations), url)
@@ -1278,6 +1299,43 @@ def probe_direct_apis(base_url: str, company_name: str) -> list[dict]:
 
         except requests.RequestException:
             continue
+
+    # ── State-iteration: try directory APIs with a state parameter ───
+    state_api_templates = [
+        "/store/electrode/api/store-directory?st={st}",
+        "/api/stores?state={st}",
+        "/api/locations?state={st}",
+        "/api/v1/stores?state={st}",
+        "/store-directory/{st_lower}",
+    ]
+    if parsed.path and parsed.path != "/":
+        base_path = parsed.path.rstrip("/")
+        state_api_templates.append(f"{base_path}/{{st_lower}}")
+        state_api_templates.append(f"{base_path}?st={{st}}")
+
+    for tmpl in state_api_templates:
+        test_url = f"{domain}{tmpl.format(st='TX', st_lower='tx')}"
+        time.sleep(random.uniform(0.5, 1.0))
+        data = _try_json_get(test_url, headers)
+        if data is None:
+            continue
+        test_locs = _extract_from_json(data, test_url)
+        if not test_locs:
+            continue
+        logger.info("State API hit with TX (%d locs): %s — sweeping all states",
+                    len(test_locs), test_url)
+        locations = list(test_locs)
+        for st in _US_STATE_CODES:
+            if st == "TX":
+                continue
+            time.sleep(random.uniform(0.3, 0.8))
+            st_url = f"{domain}{tmpl.format(st=st, st_lower=st.lower())}"
+            st_data = _try_json_get(st_url, headers)
+            if st_data is not None:
+                locations.extend(_extract_from_json(st_data, st_url))
+        if locations:
+            logger.info("State-iteration API found %d total locations", len(locations))
+            return locations
 
     logger.info("Direct API probing found no results")
     return locations

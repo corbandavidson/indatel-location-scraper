@@ -86,7 +86,11 @@ def _alt_directory_urls(company_name: str) -> list[str]:
             "https://locations.{slug}.com/index.html",
             "https://locations.{slug}.com/",
             "https://www.{slug}.com/stores",
+            "https://www.{slug}.com/store-directory",
             "https://www.{slug}.com/store-locator",
+            "https://www.{slug}.com/locations/all-locations",
+            "https://m.{slug}.com/locations/all-locations",
+            "https://m.{slug}.com/locations",
         ):
             url = tmpl.format(slug=slug)
             if url not in out:
