@@ -33,6 +33,7 @@ from scraper.extractor import (
     probe_direct_apis,
 )
 from scraper.cleaner import clean_locations
+from scraper.extractor import _try_json_get, _extract_from_json, _US_STATE_CODES
 
 from scraper_ai.planner import Planner
 from scraper_ai.stealth import render_stealth
@@ -126,6 +127,72 @@ def _try_alt_urls(company_name: str, planner: Planner | None, step):
                     company_name, r.url, len(result.html))
         return result, str(r.url)
     return None, None
+
+
+def _try_ai_api_suggestions(
+    company_name: str, failed_url: str, reason: str,
+    planner: Planner, step,
+) -> list[dict]:
+    """
+    Ask the AI planner to suggest direct API endpoints, then try each one.
+    Handles {state} placeholders by iterating all 50 US states.
+    """
+    step("extracting", "AI suggesting API endpoints")
+    suggestions = planner.suggest_api_endpoints(company_name, failed_url, reason)
+    if not suggestions:
+        return []
+
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json, text/javascript, */*",
+    }
+
+    for api_url in suggestions:
+        logger.info("[%s] Trying AI-suggested endpoint: %s", company_name, api_url)
+
+        if "{state}" in api_url:
+            step("extracting", f"AI endpoint: sweeping all states")
+            all_locs: list[dict] = []
+            for st in _US_STATE_CODES:
+                concrete = api_url.replace("{state}", st)
+                time.sleep(random.uniform(0.3, 0.8))
+                data = _try_json_get(concrete, headers)
+                if data is not None:
+                    all_locs.extend(_extract_from_json(data, concrete))
+            if all_locs:
+                logger.info("[%s] AI state-sweep found %d locations", company_name, len(all_locs))
+                return all_locs
+            continue
+
+        step("extracting", f"AI endpoint: {api_url}")
+        time.sleep(random.uniform(0.5, 1.5))
+
+        # Try as JSON API first
+        data = _try_json_get(api_url, headers)
+        if data is not None:
+            locs = _extract_from_json(data, api_url)
+            if locs:
+                logger.info("[%s] AI endpoint found %d locations at %s",
+                            company_name, len(locs), api_url)
+                return locs
+
+        # Try rendering if it looks like an HTML URL
+        try:
+            r = requests.get(api_url, headers={"User-Agent": random.choice(USER_AGENTS)},
+                             timeout=10, allow_redirects=True)
+            if r.status_code == 200 and len(r.text) > _MIN_USEFUL_HTML_BYTES:
+                result = render_page(str(r.url))
+                if result and not _render_is_blocked(result):
+                    from scraper.extractor import extract_locations
+                    locs = extract_locations(result, company_name)
+                    if locs:
+                        logger.info("[%s] AI URL rendered with %d locations: %s",
+                                    company_name, len(locs), api_url)
+                        return locs
+        except requests.RequestException:
+            pass
+
+    return []
 
 
 def _validate_locations(cleaned: list[dict], expected: dict | None) -> tuple[bool, str]:
@@ -325,9 +392,27 @@ def scrape_company_ai(
                 url = alt_url
                 method = (method + "+alt") if method else "alt"
 
-    if result is None:
-        logger.warning("[%s] No usable render", company_name)
-        return []
+    if result is None or _render_is_blocked(result):
+        # Every render path failed — ask the AI for direct API endpoints
+        # we can hit without a browser, then fall back to the dumb probe.
+        logger.warning("[%s] No usable render — trying AI-suggested API endpoints", company_name)
+        locations: list[dict] = []
+        if planner is not None:
+            locations = _try_ai_api_suggestions(
+                company_name, url, "all rendering blocked by anti-bot", planner, step,
+            )
+        if not locations:
+            step("extracting", "probing common API paths")
+            locations = probe_direct_apis(url, company_name)
+        if not locations:
+            logger.warning("[%s] No locations extracted", company_name)
+            return []
+        step("cleaning", "")
+        cleaned = clean_locations(locations, company_name)
+        if MAX_LOCATIONS > 0 and len(cleaned) > MAX_LOCATIONS:
+            cleaned = cleaned[:MAX_LOCATIONS]
+        logger.info("[%s] Final: %d locations (from API probe)", company_name, len(cleaned))
+        return cleaned
 
     # ── Step 3: pick + run strategy ──────────────────────────────────
     locations: list[dict] = []
@@ -367,7 +452,13 @@ def scrape_company_ai(
         if locations:
             logger.info("[%s] LLM extract: %d", company_name, len(locations))
 
-    # ── Step 7: direct API probe ─────────────────────────────────────
+    # ── Step 7: AI-suggested API endpoints ───────────────────────────
+    if not locations and planner is not None:
+        locations = _try_ai_api_suggestions(
+            company_name, url, "no extraction strategy found data", planner, step,
+        )
+
+    # ── Step 8: direct API probe (hardcoded patterns as last resort) ─
     if not locations:
         step("extracting", "probing common API paths")
         locations = probe_direct_apis(url, company_name)
