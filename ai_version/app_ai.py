@@ -455,36 +455,16 @@ with st.sidebar:
             key="output_format_input",
         )
 
-        model_options = [
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-        ]
-        try:
-            model_idx = model_options.index(st.session_state.gemini_model)
-        except ValueError:
-            model_idx = 0
-        model_input = st.selectbox(
-            "AI Model",
-            model_options,
-            index=model_idx,
-            key="gemini_model_input",
-            help="Which Gemini model to use. Flash is recommended for speed and cost.",
-        )
-
         # Auto-persist when anything changed
         if (
             key_input != st.session_state.ai_key
             or format_input != st.session_state.output_format
-            or model_input != st.session_state.gemini_model
         ):
             st.session_state.ai_key = key_input
             st.session_state.output_format = format_input
-            st.session_state.gemini_model = model_input
             save_settings({
                 "gemini_api_key": key_input,
-                "gemini_model": model_input,
+                "gemini_model": st.session_state.gemini_model,
                 "output_format": format_input,
             })
 
