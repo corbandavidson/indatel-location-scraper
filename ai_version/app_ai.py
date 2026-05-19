@@ -368,6 +368,22 @@ def run_scraper(companies, progress_bar, status_text, counter_text=None,
         else:
             status_text.markdown(f"**{company}** — {label}")
 
+    def _save_progress():
+        elapsed = time.time() - start_time
+        st.session_state.run_stats = {
+            "total_companies": len(companies),
+            "successful": companies_done - len(errors),
+            "total_locations": len(all_locations),
+            "errors": list(errors),
+            "elapsed": elapsed,
+        }
+        if all_locations:
+            df = pd.DataFrame(all_locations)
+            for col in COLUMNS:
+                if col not in df.columns:
+                    df[col] = ""
+            st.session_state.results = df[COLUMNS]
+
     for i, company in enumerate(companies):
         pct = int(i / total * 100)
         progress_bar.progress(i / total, text=f"{pct}% — Processing {i+1}/{total}: {company}")
@@ -383,6 +399,7 @@ def run_scraper(companies, progress_bar, status_text, counter_text=None,
 
         companies_done += 1
         _update_counter()
+        _save_progress()
 
         if i < total - 1:
             delay = random.uniform(LONG_DELAY_MIN, LONG_DELAY_MAX) if (i + 1) % LONG_DELAY_EVERY_N == 0 \
@@ -390,22 +407,9 @@ def run_scraper(companies, progress_bar, status_text, counter_text=None,
             time.sleep(delay)
 
     progress_bar.progress(1.0, text="100% — Complete")
-    elapsed = time.time() - start_time
 
-    st.session_state.run_stats = {
-        "total_companies": len(companies),
-        "successful": len(companies) - len(errors),
-        "total_locations": len(all_locations),
-        "errors": errors,
-        "elapsed": elapsed,
-    }
-
+    _save_progress()
     if all_locations:
-        df = pd.DataFrame(all_locations)
-        for col in COLUMNS:
-            if col not in df.columns:
-                df[col] = ""
-        st.session_state.results = df[COLUMNS]
         base_name = f"locations_ai_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         export_results(all_locations, output_fmt, base_name)
     else:
@@ -574,6 +578,10 @@ def _company_from_url(u: str) -> str:
     return brand.replace("-", " ").title() if brand else "Company"
 
 
+# Reset flag if a previous run was cancelled mid-flight
+if st.session_state.is_running:
+    st.session_state.is_running = False
+
 companies_to_scrape: list[str] = []
 single_manual_url: str | None = None
 
@@ -599,6 +607,10 @@ if companies_to_scrape:
     progress_bar = st.progress(0, text="Starting...")
     status_text = st.empty()
     counter_text = st.empty()
+
+    if len(companies_to_scrape) > 1:
+        st.caption("Click **Cancel** to stop after the current company finishes.")
+        st.button("Cancel Scraping", key="cancel_scrape", type="secondary")
 
     fmt_map = {"Both (CSV + Excel)": "both", "CSV Only": "csv", "Excel Only": "excel"}
     chosen_fmt = fmt_map.get(output_format, "both")

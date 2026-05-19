@@ -968,6 +968,50 @@ def extract_from_directory_tree(html: str, base_url: str, progress_cb=None) -> l
 
 # ── Strategy 5: Sitemap fallback ──────────────────────────────────────
 
+_SITEMAP_LOCATION_KW = ["location", "store", "branch", "general-store", "restaurant"]
+_SITEMAP_URL_KW = [
+    "/locations/", "/stores/", "/store/", "/branch/",
+    "/restaurants/", "/restaurant/", "/branches/",
+    "/general-store/", "/find-a-store/",
+]
+
+
+def _collect_sitemap_urls(smap_url, headers, location_urls,
+                          depth=0, max_depth=3, visited=None):
+    if visited is None:
+        visited = set()
+    if depth > max_depth or smap_url in visited:
+        return
+    visited.add(smap_url)
+
+    try:
+        body = _fetch_with_fallback(smap_url, headers)
+        if not body:
+            return
+        soup = BeautifulSoup(body, "lxml-xml")
+
+        for sitemap in soup.find_all("sitemap"):
+            loc = sitemap.find("loc")
+            if not loc:
+                continue
+            child_url = loc.text.strip()
+            has_kw = any(kw in child_url.lower() for kw in _SITEMAP_LOCATION_KW)
+            if has_kw or depth == 0:
+                _collect_sitemap_urls(child_url, headers, location_urls,
+                                     depth + 1, max_depth, visited)
+
+        for url_tag in soup.find_all("url"):
+            url_loc = url_tag.find("loc")
+            if url_loc:
+                url_text = url_loc.text.lower()
+                if any(kw in url_text for kw in _SITEMAP_URL_KW):
+                    parts = url_text.rstrip("/").split("/")
+                    if len(parts) >= 4:
+                        location_urls.append(url_loc.text)
+    except requests.RequestException:
+        pass
+
+
 def extract_from_sitemap(base_url: str) -> list[dict]:
     logger.info("Strategy 5: Trying sitemap fallback")
     from urllib.parse import urlparse
@@ -990,54 +1034,18 @@ def extract_from_sitemap(base_url: str) -> list[dict]:
         f"{domain}/sitemap-general-store.xml",
     ]
 
-    location_page_urls = []
+    location_page_urls: list[str] = []
     headers = {"User-Agent": random.choice(USER_AGENTS)}
 
     for smap_url in sitemap_urls:
-        try:
-            body = _fetch_with_fallback(smap_url, headers)
-            if not body:
-                continue
-            soup = BeautifulSoup(body, "lxml-xml")
-
-            # Check for sitemap index
-            for sitemap in soup.find_all("sitemap"):
-                loc = sitemap.find("loc")
-                if loc and any(kw in loc.text.lower() for kw in ["location", "store", "branch", "general-store"]):
-                    sub_body = _fetch_with_fallback(loc.text, headers)
-                    if not sub_body:
-                        continue
-                    sub_soup = BeautifulSoup(sub_body, "lxml-xml")
-                    for url_tag in sub_soup.find_all("url"):
-                        url_loc = url_tag.find("loc")
-                        if url_loc:
-                            location_page_urls.append(url_loc.text)
-
-            # Direct URL entries
-            for url_tag in soup.find_all("url"):
-                url_loc = url_tag.find("loc")
-                if url_loc:
-                    url_text = url_loc.text.lower()
-                    if any(kw in url_text for kw in [
-                        "/locations/", "/stores/", "/store/", "/branch/",
-                        "/restaurants/", "/restaurant/", "/branches/",
-                        "/general-store/", "/find-a-store/",
-                    ]):
-                        # Filter out pure index pages
-                        parts = url_text.rstrip("/").split("/")
-                        if len(parts) >= 4:
-                            location_page_urls.append(url_loc.text)
-
-            if location_page_urls:
-                break
-        except requests.RequestException:
-            continue
+        _collect_sitemap_urls(smap_url, headers, location_page_urls)
+        if location_page_urls:
+            break
 
     if not location_page_urls:
         logger.info("No location pages found in sitemaps")
         return []
 
-    # De-dupe in case sitemap index pages overlap
     location_page_urls = list(dict.fromkeys(location_page_urls))
 
     logger.info("Found %d potential location pages in sitemap", len(location_page_urls))

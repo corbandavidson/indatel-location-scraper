@@ -40,6 +40,25 @@ from scraper_ai.stealth import render_stealth
 
 logger = logging.getLogger("scraper_ai.orchestrator")
 
+_render_cache: dict[str, object] = {}
+
+
+def _cached_render(url: str, *, stealth: bool = False, force_playwright: bool = False):
+    suffix = "stealth" if stealth else ("playwright" if force_playwright else "normal")
+    key = f"{suffix}|{url}"
+    if key in _render_cache:
+        logger.info("Using cached render for %s", url)
+        return _render_cache[key]
+    if stealth:
+        result = render_stealth(url)
+    elif force_playwright:
+        result = render_page(url, force_playwright=True)
+    else:
+        result = render_page(url)
+    if result is not None and not _render_is_blocked(result):
+        _render_cache[key] = result
+    return result
+
 
 # Minimum location count below which we treat a strategy result as suspect
 # and try a different approach.
@@ -116,9 +135,9 @@ def _try_alt_urls(company_name: str, planner: Planner | None, step):
             continue
         # We got real HTML — render through legacy first, then stealth
         # as a fallback if legacy gets blocked.
-        result = render_page(str(r.url))
+        result = _cached_render(str(r.url))
         if _render_is_blocked(result):
-            stealth_result = render_stealth(str(r.url))
+            stealth_result = _cached_render(str(r.url), stealth=True)
             if stealth_result and not _render_is_blocked(stealth_result):
                 result = stealth_result
             else:
@@ -181,7 +200,7 @@ def _try_ai_api_suggestions(
             r = requests.get(api_url, headers={"User-Agent": random.choice(USER_AGENTS)},
                              timeout=10, allow_redirects=True)
             if r.status_code == 200 and len(r.text) > _MIN_USEFUL_HTML_BYTES:
-                result = render_page(str(r.url))
+                result = _cached_render(str(r.url))
                 if result and not _render_is_blocked(result):
                     from scraper.extractor import extract_locations
                     locs = extract_locations(result, company_name)
@@ -217,14 +236,15 @@ def _validate_locations(cleaned: list[dict], expected: dict | None) -> tuple[boo
     if expected:
         exp_count = expected.get("count", 0)
         is_national = expected.get("is_national", False)
-        # Hard-fail: less than 20% of expected for any non-tiny chain
+        regions = set(expected.get("regions") or [])
         if exp_count >= 50 and n < exp_count * _FRACTION_OF_EXPECTED:
             return False, f"got {n} locations, expected ~{exp_count}"
-        # National chain bottled up in too few states is a classic geo-filter symptom
         if is_national and exp_count > 200 and n_states < _MIN_STATES_FOR_NATIONAL:
             return False, f"national chain but only {n_states} state(s) represented"
-        # Regional chain that exceeded its declared regions is fine —
-        # we don't penalize over-collection.
+        # Regional chain: if results land entirely outside declared
+        # operating states, a geo-filter likely sent us the wrong area.
+        if not is_national and regions and states and not states.intersection(regions):
+            return False, f"results are outside operating area ({','.join(sorted(regions))})"
         return True, ""
 
     # No expected count from the AI — fall back to conservative heuristics
@@ -363,7 +383,7 @@ def scrape_company_ai(
     # ── Step 2: render ───────────────────────────────────────────────
     time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
     step("rendering", url)
-    result = render_page(url)
+    result = _cached_render(url)
     if not result:
         logger.warning("[%s] Failed to render %s", company_name, url)
     else:
@@ -376,7 +396,7 @@ def scrape_company_ai(
     if _render_is_blocked(result):
         logger.info("[%s] Page looks blocked — retrying with stealth", company_name)
         step("rendering", "stealth retry (anti-bot)")
-        stealth_result = render_stealth(url)
+        stealth_result = _cached_render(url, stealth=True)
         if stealth_result and not _render_is_blocked(stealth_result):
             logger.info("[%s] Stealth render succeeded (%d bytes, %d APIs)",
                         company_name, len(stealth_result.html),
@@ -439,7 +459,7 @@ def scrape_company_ai(
     if not locations and result.method == "static":
         step("rendering", "retrying with Playwright")
         time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
-        pw = render_page(url, force_playwright=True)
+        pw = _cached_render(url, force_playwright=True)
         if pw:
             locations = _try_all_strategies(pw, company_name, planner,
                                              dir_progress=_dir_progress)
@@ -492,9 +512,9 @@ def scrape_company_ai(
             logger.info("[%s] AI suggested alternate URL: %s", company_name, alt_url)
             step("rendering", f"retry: {alt_url}")
             time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
-            retry_result = render_page(alt_url)
+            retry_result = _cached_render(alt_url)
             if _render_is_blocked(retry_result):
-                retry_result = render_stealth(alt_url)
+                retry_result = _cached_render(alt_url, stealth=True)
             if retry_result is not None and not _render_is_blocked(retry_result):
                 step("extracting", "retry: multi-strategy")
                 retry_locs = _try_all_strategies(retry_result, company_name, planner,

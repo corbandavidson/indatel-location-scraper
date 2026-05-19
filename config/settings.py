@@ -42,8 +42,19 @@ USER_AGENTS = [
 ]
 
 LOCATOR_URL_PATTERNS = [
-    # Search-interface paths first — these are the pages that load the
-    # real locator API on user interaction.
+    # Subdomain patterns first — Yext / Uberall hosts complete listings
+    # here, and they almost never geo-filter.
+    "https://locations.{slug}.com",
+    "https://stores.{slug}.com",
+    "https://restaurants.{slug}.com",
+    "https://locations.{slug}.us",
+    "https://stores.{slug}.us",
+    # Non-www (common for single-product brands)
+    "https://{slug}.com/locations",
+    "https://{slug}.com/store-locator",
+    "https://{slug}.com/store-finder",
+    # Search-interface paths — these pages load the real locator API on
+    # user interaction.
     "https://www.{slug}.com/store-locator",
     "https://www.{slug}.com/store-finder",
     "https://www.{slug}.com/find-a-store",
@@ -52,10 +63,10 @@ LOCATOR_URL_PATTERNS = [
     "https://www.{slug}.com/storefinder",
     "https://www.{slug}.com/find-store",
     "https://www.{slug}.com/find-location",
-    # Listing paths — usually static or paginated; lower priority because
-    # they're less likely to embed a search API.
+    # Listing paths — usually static or paginated
     "https://www.{slug}.com/locations",
     "https://www.{slug}.com/locations/all",
+    "https://www.{slug}.com/store-directory",
     "https://www.{slug}.com/restaurants",
     "https://www.{slug}.com/branches",
     "https://www.{slug}.com/stores",
@@ -73,16 +84,6 @@ LOCATOR_URL_PATTERNS = [
     "https://www.{slug}.com/service-area",
     "https://www.{slug}.com/dealers",
     "https://www.{slug}.com/dealer-locator",
-    # Subdomain patterns (common for Yext, etc.)
-    "https://locations.{slug}.com",
-    "https://stores.{slug}.com",
-    "https://restaurants.{slug}.com",
-    "https://locations.{slug}.us",
-    "https://stores.{slug}.us",
-    # Non-www
-    "https://{slug}.com/locations",
-    "https://{slug}.com/store-locator",
-    "https://{slug}.com/store-finder",
 ]
 
 JS_RENDER_MARKERS = [

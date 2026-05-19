@@ -21,6 +21,26 @@ STATE_ABBREVIATIONS = {
     "virgin islands": "VI", "american samoa": "AS",
 }
 
+_STREET_ABBREVS = {
+    "street": "st", "avenue": "ave", "boulevard": "blvd", "drive": "dr",
+    "road": "rd", "lane": "ln", "court": "ct", "place": "pl",
+    "circle": "cir", "highway": "hwy", "parkway": "pkwy", "terrace": "ter",
+    "trail": "trl", "way": "wy", "square": "sq",
+    "east": "e", "west": "w", "north": "n", "south": "s",
+    "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw",
+    "suite": "ste", "apartment": "apt", "building": "bldg", "floor": "fl",
+}
+_ABBREV_RE = re.compile(
+    r'\b(' + '|'.join(re.escape(k) for k in sorted(_STREET_ABBREVS, key=len, reverse=True)) + r')\b',
+    re.IGNORECASE,
+)
+
+
+def _normalize_street_for_dedup(street: str) -> str:
+    s = street.lower().strip()
+    s = _ABBREV_RE.sub(lambda m: _STREET_ABBREVS[m.group(1).lower()], s)
+    return re.sub(r'\W+', '', s)
+
 
 def _normalize_whitespace(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
@@ -99,7 +119,7 @@ def _assess_quality(loc: dict) -> str:
 
 
 def _dedup_key(loc: dict) -> str:
-    street = re.sub(r'\W+', '', (loc.get("street_address") or "").lower())
+    street = _normalize_street_for_dedup(loc.get("street_address") or "")
     zipcode = re.sub(r'\W+', '', (loc.get("zip_code") or "").lower())
     return f"{street}|{zipcode}"
 
