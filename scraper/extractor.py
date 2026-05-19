@@ -658,7 +658,6 @@ def _estimate_store_count(html: str, state_urls: list[str]) -> int:
         except ValueError:
             continue
     return total
-    return []
 
 
 _JSONLD_BLOCK_RE = re.compile(
@@ -999,15 +998,7 @@ def extract_from_sitemap(base_url: str) -> list[dict]:
             body = _fetch_with_fallback(smap_url, headers)
             if not body:
                 continue
-            # Reuse the response object's "text" interface by creating a stub
-            class _Stub:
-                pass
-            resp = _Stub()
-            resp.text = body
-            resp.status_code = 200
-            if resp.status_code != 200:
-                continue
-            soup = BeautifulSoup(resp.text, "lxml-xml")
+            soup = BeautifulSoup(body, "lxml-xml")
 
             # Check for sitemap index
             for sitemap in soup.find_all("sitemap"):

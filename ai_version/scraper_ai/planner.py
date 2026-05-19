@@ -350,5 +350,5 @@ def get_planner_from_env() -> Optional[Planner]:
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
         return None
-    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     return Planner(PlannerConfig(api_key=api_key, model=model))

@@ -359,8 +359,9 @@ def _sweep_us_zips(intercepted: list[dict], cookies: list[dict]) -> list[dict]:
                     results.append(r)
             except Exception:
                 pass
-            if i % 50 == 0:
-                logger.info("Sweep progress: %d/%d zips, %d hits", i, len(to_sweep), len(results))
+            if i % 25 == 0:
+                logger.info("Sweep progress: %d/%d zips (%d%%), %d hits",
+                            i, len(to_sweep), int(i / len(to_sweep) * 100), len(results))
 
     logger.info("Sweep complete: %d/%d zip responses captured", len(results), len(to_sweep))
     return results
