@@ -108,12 +108,17 @@ def load_settings() -> dict:
 
 
 def save_settings(d: dict) -> None:
-    """Persist settings. Silent on failure (e.g. permission denied)."""
+    """Persist settings. Warns in the UI on failure so users know their
+    settings won't survive a restart."""
     try:
         SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(d, indent=2), encoding="utf-8")
     except Exception:
-        pass
+        st.warning(
+            f"Could not save settings to {SETTINGS_FILE}. "
+            "Your changes will be lost when the app restarts.",
+            icon="⚠️",
+        )
 
 # Make the legacy scraper modules importable
 _PARENT = Path(__file__).resolve().parent.parent

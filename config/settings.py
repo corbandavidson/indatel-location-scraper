@@ -7,7 +7,7 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", BASE_DIR / "output"))
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(BASE_DIR / "output")))
 LOG_DIR = BASE_DIR / "logs"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 

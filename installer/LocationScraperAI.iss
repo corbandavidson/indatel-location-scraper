@@ -76,5 +76,3 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\output"
 Type: files; Name: "{app}\launcher.log"
-Type: files; Name: "{app}\streamlit_errors.log"
-Type: files; Name: "{app}\streamlit_stdout.log"

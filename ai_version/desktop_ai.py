@@ -47,7 +47,7 @@ def _find_free_port(start=8502, end=8600):
                 return port
             except OSError:
                 continue
-    return start
+    return None
 
 
 def _wait_for_server(port, timeout=60):
@@ -91,9 +91,14 @@ def _start_streamlit(port):
         "--server.fileWatcherType", "none",
     ]
 
+    log_dir = exe_dir / "logs"
+    log_dir.mkdir(exist_ok=True)
+    stdout_log = open(log_dir / "streamlit_stdout.log", "w", encoding="utf-8")
+    stderr_log = open(log_dir / "streamlit_stderr.log", "w", encoding="utf-8")
+
     _server_proc = subprocess.Popen(
         cmd, cwd=str(app_dir), env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=stdout_log, stderr=stderr_log,
         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
     )
 
@@ -111,8 +116,29 @@ def _kill_server():
 atexit.register(_kill_server)
 
 
+def _read_tail(path, lines=30):
+    """Return the last N lines of a log file, or '' if unreadable."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        return "\n".join(text.splitlines()[-lines:])
+    except Exception:
+        return ""
+
+
 def main():
     port = _find_free_port()
+    if port is None:
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "Could not find a free port (tried 8502–8600).\n\n"
+            "Close other instances of this app or free up a port and try again.",
+            TITLE, 0x10,
+        )
+        return
+
+    exe_dir = _get_dirs()[0]
+    log_dir = exe_dir / "logs"
+
     try:
         _start_streamlit(port)
     except Exception as e:
@@ -121,7 +147,12 @@ def main():
 
     if not _wait_for_server(port, timeout=60):
         _kill_server()
-        ctypes.windll.user32.MessageBoxW(0, "Server did not start in time.", TITLE, 0x10)
+        stderr_tail = _read_tail(log_dir / "streamlit_stderr.log")
+        msg = "The app server did not start in time.\n\n"
+        if stderr_tail:
+            msg += f"Last error output:\n{stderr_tail}\n\n"
+        msg += f"Full logs are in:\n{log_dir}"
+        ctypes.windll.user32.MessageBoxW(0, msg, TITLE, 0x10)
         return
 
     import webbrowser
