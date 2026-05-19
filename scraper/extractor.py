@@ -1266,8 +1266,6 @@ def probe_direct_apis(base_url: str, company_name: str) -> list[dict]:
         "/wp-json/locations/v1/all",
         "/wp-json/wp/v2/locations?per_page=100",
         "/_api/locations",
-        "/store/electrode/api/store-directory",
-        "/locations/location-search-ajax",
         "/graphql",
     ]
 

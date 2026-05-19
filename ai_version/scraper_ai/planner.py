@@ -305,6 +305,51 @@ class Planner:
             return None
         return url
 
+    def suggest_api_endpoints(
+        self,
+        company_name: str,
+        failed_url: str,
+        reason: str,
+    ) -> list[str]:
+        """
+        When rendering is blocked by anti-bot protection, ask the LLM to
+        suggest direct API endpoints we can hit with plain HTTP requests.
+        Returns a list of URLs to try.
+        """
+        prompt = (
+            f"We're trying to scrape all US store locations for '{company_name}'. "
+            f"We tried rendering '{failed_url}' but it was blocked ({reason}).\n\n"
+            "We need DIRECT API endpoints or data URLs we can hit with a "
+            "plain HTTP GET (no browser needed). Think about:\n"
+            "  - Internal REST APIs (e.g. /api/stores, /store/electrode/api/store-directory)\n"
+            "  - AJAX endpoints the store locator calls behind the scenes\n"
+            "  - Mobile site URLs (m.brand.com) that may have lighter bot protection\n"
+            "  - JSON data files or endpoints that return store data directly\n"
+            "  - Sitemap XML files that list every store page URL\n"
+            "  - State-parameterized APIs (e.g. ?st=TX) — mark these with {state} placeholder\n\n"
+            "Return up to 5 URLs, one per line, most likely first. Use {state} as a "
+            "placeholder for state code if the API takes a state parameter (we'll "
+            "iterate all 50 states automatically).\n\n"
+            "Example output:\n"
+            "  https://www.example.com/store/api/directory?st={state}\n"
+            "  https://m.example.com/locations/all-locations\n"
+            "  https://www.example.com/sitemap-stores.xml\n\n"
+            "Return ONLY URLs, one per line. No markdown, no explanation. "
+            "If you have no ideas, reply: NONE"
+        )
+        result = self._generate(prompt)
+        if not result:
+            return []
+        urls = []
+        for line in result.strip().splitlines():
+            line = line.strip().lstrip("- ")
+            if line.upper() == "NONE":
+                return []
+            m = re.search(r"https?://[^\s'\"<>]+", line)
+            if m:
+                urls.append(m.group(0).rstrip(".,"))
+        return urls[:5]
+
     def extract_stores_from_html(self, html: str, page_url: str) -> list[dict]:
         """
         Last-resort: feed the HTML to the LLM and ask for store records as
