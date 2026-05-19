@@ -51,6 +51,11 @@ DisableReadyPage=no
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 
+; Auto-close the running app (and its child Python/Streamlit processes)
+; before installing, so updates don't hit locked-file errors.
+CloseApplications=force
+CloseApplicationsFilter=*.exe,*.dll,*.pyd
+
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
