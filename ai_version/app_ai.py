@@ -92,6 +92,8 @@ DEFAULT_SETTINGS = {
     "gemini_api_key": "",
     "output_format": "Both (CSV + Excel)",
     "gemini_model": "gemini-2.5-flash",
+    "supabase_url": "",
+    "supabase_key": "",
 }
 
 
@@ -143,6 +145,7 @@ from config.settings import (
 from scraper.exporter import export_results, COLUMNS
 from scraper_ai.orchestrator import scrape_company_ai
 from scraper_ai.planner import Planner, PlannerConfig
+from scraper_ai.shared_cache import SharedCache
 
 
 # ── Page config ───────────────────────────────────────────────────────
@@ -282,6 +285,8 @@ for key, default in [
     ("ai_key", os.getenv("GEMINI_API_KEY") or _loaded["gemini_api_key"]),
     ("output_format", _loaded["output_format"]),
     ("gemini_model", _loaded["gemini_model"]),
+    ("supabase_url", _loaded["supabase_url"]),
+    ("supabase_key", _loaded["supabase_key"]),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -327,6 +332,14 @@ def build_planner() -> Planner | None:
     return Planner(PlannerConfig(api_key=key, model=model))
 
 
+def build_cache() -> SharedCache | None:
+    url = (st.session_state.get("supabase_url") or "").strip()
+    key = (st.session_state.get("supabase_key") or "").strip()
+    if not url or not key:
+        return None
+    return SharedCache(url, key)
+
+
 # ── Runner ────────────────────────────────────────────────────────────
 
 def run_scraper(companies, progress_bar, status_text, counter_text=None,
@@ -336,10 +349,13 @@ def run_scraper(companies, progress_bar, status_text, counter_text=None,
     st.session_state.log_lines = []
 
     planner = build_planner()
+    cache = build_cache()
     if planner is None:
         logger.info("No API key — running standard pipeline")
     else:
         logger.info("AI planner enabled")
+    if cache is not None:
+        logger.info("Shared database connected")
 
     all_locations, errors = [], []
     companies_done = 0
@@ -387,12 +403,31 @@ def run_scraper(companies, progress_bar, status_text, counter_text=None,
     for i, company in enumerate(companies):
         pct = int(i / total * 100)
         progress_bar.progress(i / total, text=f"{pct}% — Processing {i+1}/{total}: {company}")
+
+        # Check shared cache first (skip the entire pipeline if we have results)
+        if cache is not None and not manual_url:
+            status_text.markdown(f"**{company}** — Checking shared database")
+            cached = cache.get_cached(company)
+            if cached:
+                logger.info("[%s] Using %d cached locations from shared database",
+                            company, len(cached))
+                status_text.markdown(
+                    f"**{company}** — Retrieved **{len(cached):,}** locations from shared database"
+                )
+                all_locations.extend(cached)
+                companies_done += 1
+                _update_counter()
+                _save_progress()
+                continue
+
         try:
             locs = scrape_company_ai(company, planner=planner, manual_url=manual_url,
                                      progress_callback=progress_callback)
             all_locations.extend(locs)
             if not locs:
                 errors.append((company, "No locations found"))
+            elif cache is not None:
+                cache.save(company, locs)
         except Exception as e:
             logger.error("[%s] Error: %s", company, e)
             errors.append((company, str(e)))
@@ -470,12 +505,45 @@ with st.sidebar:
                 "gemini_api_key": key_input,
                 "gemini_model": st.session_state.gemini_model,
                 "output_format": format_input,
+                "supabase_url": st.session_state.supabase_url,
+                "supabase_key": st.session_state.supabase_key,
             })
 
         if st.session_state.ai_key:
             st.success("AI enabled")
         else:
             st.info("Don't have a key? **Contact INDATEL Labs** to get one.")
+
+    with st.expander("🗄️  Shared Database", expanded=False):
+        sb_url = st.text_input(
+            "Supabase URL",
+            value=st.session_state.supabase_url,
+            placeholder="https://xxxxx.supabase.co",
+            help="Project URL from your Supabase dashboard.",
+            key="sb_url_input",
+        )
+        sb_key = st.text_input(
+            "Supabase Key",
+            type="password",
+            value=st.session_state.supabase_key,
+            placeholder="Paste your anon/public key",
+            help="The anon (public) key from Settings → API in Supabase.",
+            key="sb_key_input",
+        )
+        if sb_url != st.session_state.supabase_url or sb_key != st.session_state.supabase_key:
+            st.session_state.supabase_url = sb_url
+            st.session_state.supabase_key = sb_key
+            save_settings({
+                "gemini_api_key": st.session_state.ai_key,
+                "gemini_model": st.session_state.gemini_model,
+                "output_format": st.session_state.output_format,
+                "supabase_url": sb_url,
+                "supabase_key": sb_key,
+            })
+        if sb_url and sb_key:
+            st.success("Shared database connected")
+        else:
+            st.caption("Optional — scrape results are shared across all users.")
 
     output_format = st.session_state.output_format  # used downstream
 
@@ -500,7 +568,13 @@ with st.sidebar:
 
 # ── Main content ──────────────────────────────────────────────────────
 
-tab_single, tab_batch = st.tabs(["Single Company", "Batch (Excel / CSV Upload)"])
+_tab_labels = ["Single Company", "Batch (Excel / CSV Upload)"]
+_cache_available = bool(st.session_state.supabase_url and st.session_state.supabase_key)
+if _cache_available:
+    _tab_labels.append("Shared Database")
+_tabs = st.tabs(_tab_labels)
+tab_single = _tabs[0]
+tab_batch = _tabs[1]
 
 with tab_single:
     with st.form(key="single_form", clear_on_submit=False, border=False):
@@ -562,6 +636,21 @@ with tab_batch:
         else:
             st.error("No company names found in the first column.")
     run_batch = st.button("Scrape All Companies", key="run_batch", use_container_width=True)
+
+if _cache_available:
+    with _tabs[2]:
+        st.markdown("Browse results that have been scraped by any user on the team.")
+        _db_cache = build_cache()
+        if _db_cache is not None:
+            _db_companies = _db_cache.list_companies()
+            if _db_companies:
+                _db_df = pd.DataFrame(_db_companies)
+                _db_df["scraped_at"] = pd.to_datetime(_db_df["scraped_at"]).dt.strftime("%Y-%m-%d %H:%M")
+                _db_df.columns = ["Company", "Last Scraped", "Locations", "Scraped By"]
+                st.dataframe(_db_df, use_container_width=True, hide_index=True)
+                st.caption(f"{len(_db_companies)} companies in shared database")
+            else:
+                st.info("No companies in the shared database yet. Scrape a company to populate it.")
 
 
 # ── Execute scraping ──────────────────────────────────────────────────
