@@ -343,7 +343,7 @@ def build_cache() -> SharedCache | None:
 # ── Runner ────────────────────────────────────────────────────────────
 
 def run_scraper(companies, progress_bar, status_text, counter_text=None,
-                manual_url=None, output_fmt="both"):
+                manual_url=None, output_fmt="both", force_rescrape=False):
     setup_ui_logging()
     logger = logging.getLogger("main")
     st.session_state.log_lines = []
@@ -405,14 +405,19 @@ def run_scraper(companies, progress_bar, status_text, counter_text=None,
         progress_bar.progress(i / total, text=f"{pct}% — Processing {i+1}/{total}: {company}")
 
         # Check shared cache first (skip the entire pipeline if we have results)
-        if cache is not None and not manual_url:
+        if cache is not None and not manual_url and not force_rescrape:
             status_text.markdown(f"**{company}** — Checking shared database")
-            cached = cache.get_cached(company)
-            if cached:
-                logger.info("[%s] Using %d cached locations from shared database",
-                            company, len(cached))
+            hit = cache.get_cached(company)
+            if hit is not None:
+                cached, age_days = hit
+                age_str = "today" if age_days == 0 else (
+                    "yesterday" if age_days == 1 else f"{age_days} days ago"
+                )
+                logger.info("[%s] Using %d cached locations (scraped %s)",
+                            company, len(cached), age_str)
                 status_text.markdown(
-                    f"**{company}** — Retrieved **{len(cached):,}** locations from shared database"
+                    f"**{company}** — **{len(cached):,}** locations from shared database "
+                    f"(scraped {age_str})"
                 )
                 all_locations.extend(cached)
                 companies_done += 1
@@ -697,9 +702,13 @@ if companies_to_scrape:
     status_text = st.empty()
     counter_text = st.empty()
 
-    if len(companies_to_scrape) > 1:
-        st.caption("Click **Cancel** to stop after the current company finishes.")
-        st.button("Cancel Scraping", key="cancel_scrape", type="secondary")
+    _ctrl_cols = st.columns([1, 1, 4])
+    with _ctrl_cols[0]:
+        if len(companies_to_scrape) > 1:
+            st.button("Cancel Scraping", key="cancel_scrape", type="secondary")
+    with _ctrl_cols[1]:
+        _force = st.checkbox("Force re-scrape", key="force_rescrape",
+                             help="Ignore the shared database and scrape fresh data")
 
     fmt_map = {"Both (CSV + Excel)": "both", "CSV Only": "csv", "Excel Only": "excel"}
     chosen_fmt = fmt_map.get(output_format, "both")
@@ -707,7 +716,8 @@ if companies_to_scrape:
     with st.spinner(""):
         run_scraper(companies_to_scrape, progress_bar, status_text,
                     counter_text=counter_text,
-                    manual_url=single_manual_url, output_fmt=chosen_fmt)
+                    manual_url=single_manual_url, output_fmt=chosen_fmt,
+                    force_rescrape=_force)
 
     st.session_state.is_running = False
     status_text.empty()

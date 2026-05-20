@@ -24,7 +24,7 @@ _LOCATION_FIELDS = [
 
 class SharedCache:
     def __init__(self, supabase_url: str, supabase_key: str,
-                 max_age_days: int = 90):
+                 max_age_days: int = 30):
         self.base = supabase_url.rstrip("/")
         self.headers = {
             "apikey": supabase_key,
@@ -33,7 +33,8 @@ class SharedCache:
         }
         self.max_age_days = max_age_days
 
-    def get_cached(self, company_name: str) -> list[dict] | None:
+    def get_cached(self, company_name: str) -> tuple[list[dict], int] | None:
+        """Return (locations, age_in_days) or None if not cached / expired."""
         try:
             r = requests.get(
                 f"{self.base}/rest/v1/scrape_cache",
@@ -73,7 +74,7 @@ class SharedCache:
 
             logger.info("[%s] Cache hit: %d locations (scraped %d day(s) ago)",
                         company_name, len(locs), age)
-            return locs
+            return locs, age
         except Exception as e:
             logger.debug("Cache lookup failed: %s", e)
             return None
