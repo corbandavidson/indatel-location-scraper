@@ -25,6 +25,16 @@
   Don't rewrite version.py. Useful when rebuilding the same version
   after fixing something in the installer config.
 
+.PARAMETER FullRebuild
+  Re-install all pip packages from requirements.txt into the embedded
+  Python before syncing source and building the installer. Required
+  when a new dependency is added (e.g. curl_cffi). Also re-installs
+  Playwright browsers to pick up any new ones.
+
+  This does NOT rebuild the PyInstaller launcher exe — that's only
+  needed if desktop_ai.py or the .spec file changed (rare; run
+  pyinstaller manually for that).
+
 .EXAMPLE
   .\build.ps1 -Version 1.0.1
   # builds installer at installer\Output\LocationScraperAI-Setup-1.0.1.exe
@@ -32,6 +42,10 @@
 .EXAMPLE
   .\build.ps1 -Version 1.0.1 -Publish
   # builds, commits, tags, pushes, creates v1.0.1 GitHub release
+
+.EXAMPLE
+  .\build.ps1 -Version 1.1.0 -FullRebuild -Publish
+  # installs new deps, builds installer, publishes
 #>
 
 [CmdletBinding()]
@@ -42,7 +56,9 @@ param(
 
     [switch]$Publish,
 
-    [switch]$SkipBump
+    [switch]$SkipBump,
+
+    [switch]$FullRebuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,6 +84,61 @@ if (-not (Test-Path $DistFolder)) {
 }
 if (-not (Test-Path $VersionFile)) {
     throw "Version file missing: $VersionFile"
+}
+
+# ── 0. Full rebuild — reinstall packages into embedded Python ────────
+if ($FullRebuild) {
+    $EmbeddedPython = Join-Path $DistFolder "python\python.exe"
+    if (-not (Test-Path $EmbeddedPython)) {
+        throw "Embedded Python not found at $EmbeddedPython. Run build.bat first to create the dist tree."
+    }
+    $ReqFile = Join-Path $Root "requirements.txt"
+
+    Write-Step "Installing pip packages into embedded Python"
+    & $EmbeddedPython -m pip install --quiet --upgrade pip
+    & $EmbeddedPython -m pip install --quiet -r $ReqFile
+    if ($LASTEXITCODE -ne 0) {
+        throw "pip install failed (exit $LASTEXITCODE)"
+    }
+    # Verify the new dependency is importable
+    & $EmbeddedPython -c "from curl_cffi import requests; print('  curl_cffi OK')" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "curl_cffi did not install correctly — TLS impersonation will be disabled."
+    }
+
+    Write-Step "Reinstalling Playwright browsers"
+    & $EmbeddedPython -m playwright install chromium
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Playwright chromium install failed — existing browser will be used."
+    }
+    # Firefox is optional — install it for the anti-bot fallback tier.
+    # If it fails (e.g. disk space) the app still works, just without
+    # the Firefox fallback.
+    & $EmbeddedPython -m playwright install firefox 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  Firefox browser installed (anti-bot fallback)" -ForegroundColor Green
+    } else {
+        Write-Host "  Firefox install skipped (optional)" -ForegroundColor Yellow
+    }
+
+    # Copy updated Playwright browsers into the dist bundle
+    $PwBrowsers = Join-Path $env:LOCALAPPDATA "ms-playwright"
+    $PwDest = Join-Path $DistFolder "playwright-browsers"
+    if (Test-Path $PwBrowsers) {
+        Write-Step "Syncing Playwright browsers into dist"
+        # Chromium (always)
+        Get-ChildItem -Path $PwBrowsers -Directory -Filter "chromium*" | ForEach-Object {
+            robocopy $_.FullName (Join-Path $PwDest $_.Name) /MIR /NFL /NDL /NJH /NJS /NC /NS | Out-Null
+        }
+        # Firefox (if installed)
+        Get-ChildItem -Path $PwBrowsers -Directory -Filter "firefox*" | ForEach-Object {
+            robocopy $_.FullName (Join-Path $PwDest $_.Name) /MIR /NFL /NDL /NJH /NJS /NC /NS | Out-Null
+        }
+        # ffmpeg (shared dependency)
+        Get-ChildItem -Path $PwBrowsers -Directory -Filter "ffmpeg*" | ForEach-Object {
+            robocopy $_.FullName (Join-Path $PwDest $_.Name) /MIR /NFL /NDL /NJH /NJS /NC /NS | Out-Null
+        }
+    }
 }
 
 # ── 1. Bump version.py ──────────────────────────────────────────────
