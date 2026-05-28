@@ -20,6 +20,16 @@ if str(_PARENT) not in sys.path:
 
 import requests
 
+# Prefer curl_cffi for TLS-safe HTTP requests when available.
+try:
+    from curl_cffi import requests as curl_requests
+    _HAS_CURL_CFFI = True
+except ImportError:
+    curl_requests = None
+    _HAS_CURL_CFFI = False
+
+import config.settings as _settings
+
 from config.settings import REQUEST_DELAY_MIN, REQUEST_DELAY_MAX, MAX_LOCATIONS, USER_AGENTS
 from scraper.discovery import discover_locator_url, _slug_candidates
 from scraper.renderer import render_page
@@ -36,20 +46,24 @@ from scraper.cleaner import clean_locations
 from scraper.extractor import _try_json_get, _extract_from_json, _US_STATE_CODES
 
 from scraper_ai.planner import Planner
-from scraper_ai.stealth import render_stealth
+from scraper_ai.stealth import render_stealth, render_firefox
 
 logger = logging.getLogger("scraper_ai.orchestrator")
 
 _render_cache: dict[str, object] = {}
 
 
-def _cached_render(url: str, *, stealth: bool = False, force_playwright: bool = False):
-    suffix = "stealth" if stealth else ("playwright" if force_playwright else "normal")
+def _cached_render(url: str, *, stealth: bool = False, firefox: bool = False,
+                   force_playwright: bool = False):
+    suffix = ("firefox" if firefox else "stealth" if stealth
+              else "playwright" if force_playwright else "normal")
     key = f"{suffix}|{url}"
     if key in _render_cache:
         logger.info("Using cached render for %s", url)
         return _render_cache[key]
-    if stealth:
+    if firefox:
+        result = render_firefox(url)
+    elif stealth:
         result = render_stealth(url)
     elif force_playwright:
         result = render_page(url, force_playwright=True)
@@ -125,23 +139,34 @@ def _try_alt_urls(company_name: str, planner: Planner | None, step):
     or (None, None).
     """
     headers = {"User-Agent": random.choice(USER_AGENTS)}
+    proxies = {"http": _settings.PROXY_URL, "https": _settings.PROXY_URL} if _settings.PROXY_URL.strip() else None
     for alt in _alt_directory_urls(company_name):
         step("rendering", f"fallback: {alt}")
         try:
-            r = requests.get(alt, headers=headers, timeout=10, allow_redirects=True)
-        except requests.RequestException:
+            if _HAS_CURL_CFFI:
+                r = curl_requests.get(alt, headers=headers, timeout=10,
+                                      allow_redirects=True, impersonate="chrome",
+                                      proxies=proxies)
+            else:
+                r = requests.get(alt, headers=headers, timeout=10,
+                                 allow_redirects=True, proxies=proxies)
+        except Exception:
             continue
         if r.status_code != 200 or len(r.text) < _MIN_USEFUL_HTML_BYTES:
             continue
-        # We got real HTML — render through legacy first, then stealth
-        # as a fallback if legacy gets blocked.
+        # We got real HTML — render through legacy first, then stealth,
+        # then Firefox as a fallback if both get blocked.
         result = _cached_render(str(r.url))
         if _render_is_blocked(result):
             stealth_result = _cached_render(str(r.url), stealth=True)
             if stealth_result and not _render_is_blocked(stealth_result):
                 result = stealth_result
             else:
-                continue
+                ff_result = _cached_render(str(r.url), firefox=True)
+                if ff_result and not _render_is_blocked(ff_result):
+                    result = ff_result
+                else:
+                    continue
         logger.info("[%s] Alt URL succeeded: %s (%d bytes)",
                     company_name, r.url, len(result.html))
         return result, str(r.url)
@@ -165,6 +190,7 @@ def _try_ai_api_suggestions(
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "application/json, text/javascript, */*",
     }
+    proxies = {"http": _settings.PROXY_URL, "https": _settings.PROXY_URL} if _settings.PROXY_URL.strip() else None
 
     for api_url in suggestions:
         logger.info("[%s] Trying AI-suggested endpoint: %s", company_name, api_url)
@@ -197,8 +223,14 @@ def _try_ai_api_suggestions(
 
         # Try rendering if it looks like an HTML URL
         try:
-            r = requests.get(api_url, headers={"User-Agent": random.choice(USER_AGENTS)},
-                             timeout=10, allow_redirects=True)
+            _hdr = {"User-Agent": random.choice(USER_AGENTS)}
+            if _HAS_CURL_CFFI:
+                r = curl_requests.get(api_url, headers=_hdr, timeout=10,
+                                      allow_redirects=True, impersonate="chrome",
+                                      proxies=proxies)
+            else:
+                r = requests.get(api_url, headers=_hdr, timeout=10,
+                                 allow_redirects=True, proxies=proxies)
             if r.status_code == 200 and len(r.text) > _MIN_USEFUL_HTML_BYTES:
                 result = _cached_render(str(r.url))
                 if result and not _render_is_blocked(result):
@@ -208,7 +240,7 @@ def _try_ai_api_suggestions(
                         logger.info("[%s] AI URL rendered with %d locations: %s",
                                     company_name, len(locs), api_url)
                         return locs
-        except requests.RequestException:
+        except Exception:
             pass
 
     return []
@@ -404,13 +436,25 @@ def scrape_company_ai(
             result = stealth_result
             method = (method + "+stealth") if method else "stealth"
         else:
-            # Stealth also blocked — fall through to subdomain probe
-            logger.info("[%s] Stealth also blocked — trying alt URLs", company_name)
-            alt_result, alt_url = _try_alt_urls(company_name, planner, step)
-            if alt_result is not None:
-                result = alt_result
-                url = alt_url
-                method = (method + "+alt") if method else "alt"
+            # Stealth Chromium also blocked — try Firefox (different TLS
+            # fingerprint, different JS engine, rarely blocked).
+            logger.info("[%s] Stealth blocked — trying Firefox engine", company_name)
+            step("rendering", "Firefox fallback (different TLS)")
+            ff_result = _cached_render(url, firefox=True)
+            if ff_result and not _render_is_blocked(ff_result):
+                logger.info("[%s] Firefox render succeeded (%d bytes, %d APIs)",
+                            company_name, len(ff_result.html),
+                            len(ff_result.intercepted_apis))
+                result = ff_result
+                method = (method + "+firefox") if method else "firefox"
+            else:
+                # All browser engines blocked — try subdomain patterns
+                logger.info("[%s] All engines blocked — trying alt URLs", company_name)
+                alt_result, alt_url = _try_alt_urls(company_name, planner, step)
+                if alt_result is not None:
+                    result = alt_result
+                    url = alt_url
+                    method = (method + "+alt") if method else "alt"
 
     if result is None or _render_is_blocked(result):
         # Every render path failed — ask the AI for direct API endpoints
@@ -515,6 +559,8 @@ def scrape_company_ai(
             retry_result = _cached_render(alt_url)
             if _render_is_blocked(retry_result):
                 retry_result = _cached_render(alt_url, stealth=True)
+            if _render_is_blocked(retry_result):
+                retry_result = _cached_render(alt_url, firefox=True)
             if retry_result is not None and not _render_is_blocked(retry_result):
                 step("extracting", "retry: multi-strategy")
                 retry_locs = _try_all_strategies(retry_result, company_name, planner,

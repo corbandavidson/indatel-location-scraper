@@ -8,7 +8,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
+# curl_cffi impersonates a real browser's TLS fingerprint (JA3/JA4),
+# defeating network-level bot detection that plain `requests` fails.
+# Falls back to regular requests if not installed.
+try:
+    from curl_cffi import requests as curl_requests
+    _HAS_CURL_CFFI = True
+except ImportError:
+    curl_requests = None
+    _HAS_CURL_CFFI = False
+
+import config.settings as _settings
+
 from config.settings import (
+    CHROME_USER_AGENTS,
     USER_AGENTS,
     JS_RENDER_MARKERS,
     API_ENDPOINT_PATTERNS,
@@ -30,12 +43,29 @@ class RenderResult:
     status_code: int = 200
 
 
+def _get_proxy_dict() -> dict | None:
+    """Build a requests-compatible proxy dict from the configured proxy URL.
+
+    Reads from the module attribute (not a local copy) so UI changes
+    made at runtime via ``config.settings.PROXY_URL = ...`` are visible.
+    """
+    url = _settings.PROXY_URL.strip()
+    if not url:
+        return None
+    return {"http": url, "https": url}
+
+
 def _get_headers():
     return {
         "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
     }
 
 
@@ -241,8 +271,17 @@ def _build_sweep_url(template: dict, zip_code: str, lat: float | None, lng: floa
     ))
 
 
-def _build_session_from_cookies(cookies: list[dict], headers: dict) -> requests.Session:
-    sess = requests.Session()
+def _build_session_from_cookies(cookies: list[dict], headers: dict):
+    """Build an HTTP session that carries browser cookies and headers.
+
+    Uses curl_cffi when available so the TLS fingerprint matches a real
+    browser even during the nationwide zip sweep.
+    """
+    if _HAS_CURL_CFFI:
+        sess = curl_requests.Session(impersonate="chrome")
+    else:
+        sess = requests.Session()
+
     for c in cookies:
         try:
             sess.cookies.set(
@@ -263,6 +302,11 @@ def _build_session_from_cookies(cookies: list[dict], headers: dict) -> requests.
             sess.headers[k] = v
         except Exception:
             pass
+
+    proxies = _get_proxy_dict()
+    if proxies:
+        sess.proxies.update(proxies)
+
     return sess
 
 
@@ -323,7 +367,7 @@ def _sweep_us_zips(intercepted: list[dict], cookies: list[dict]) -> list[dict]:
         url = _build_sweep_url(template, zip_code, lat, lng)
         try:
             resp = sess.get(url, timeout=15)
-        except requests.RequestException:
+        except Exception:
             return None
         # Treat 429 / 5xx as transient — retry up to twice with backoff
         if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
@@ -368,25 +412,53 @@ def _sweep_us_zips(intercepted: list[dict], cookies: list[dict]) -> list[dict]:
 
 
 def _render_static(url: str) -> RenderResult | None:
-    logger.info("Attempting static render: %s", url)
-    try:
-        resp = requests.get(url, headers=_get_headers(), timeout=20, allow_redirects=True)
-        resp.raise_for_status()
+    """Fetch a page with a static HTTP request.
 
-        if _looks_js_rendered(resp.text):
-            logger.info("Page appears to be JS-rendered, will try Playwright")
+    Uses curl_cffi when available to impersonate a real Chrome TLS
+    fingerprint (JA3/JA4), which defeats network-level bot detection
+    that would block plain ``requests``.
+    """
+    logger.info("Attempting static render: %s", url)
+    proxies = _get_proxy_dict()
+
+    # Prefer curl_cffi — its TLS fingerprint matches real Chrome.
+    if _HAS_CURL_CFFI:
+        try:
+            resp = curl_requests.get(
+                url,
+                headers=_get_headers(),
+                timeout=20,
+                allow_redirects=True,
+                impersonate="chrome",
+                proxies=proxies,
+            )
+            resp.raise_for_status()
+            text = resp.text
+            final_url = str(resp.url)
+            status = resp.status_code
+        except Exception as e:
+            logger.warning("curl_cffi static request failed: %s", e)
+            return None
+    else:
+        try:
+            resp = requests.get(
+                url, headers=_get_headers(), timeout=20,
+                allow_redirects=True, proxies=proxies,
+            )
+            resp.raise_for_status()
+            text = resp.text
+            final_url = str(resp.url)
+            status = resp.status_code
+        except requests.RequestException as e:
+            logger.warning("Static request failed: %s", e)
             return None
 
-        logger.info("Static render successful (%d bytes)", len(resp.text))
-        return RenderResult(
-            html=resp.text,
-            final_url=str(resp.url),
-            method="static",
-            status_code=resp.status_code,
-        )
-    except requests.RequestException as e:
-        logger.warning("Static request failed: %s", e)
+    if _looks_js_rendered(text):
+        logger.info("Page appears to be JS-rendered, will try Playwright")
         return None
+
+    logger.info("Static render successful (%d bytes)", len(text))
+    return RenderResult(html=text, final_url=final_url, method="static", status_code=status)
 
 
 def _render_playwright(url: str) -> RenderResult | None:
@@ -402,10 +474,14 @@ def _render_playwright(url: str) -> RenderResult | None:
     try:
         with sync_playwright() as p:
             browser_type = getattr(p, BROWSER, p.chromium)
-            browser = browser_type.launch(headless=True)
+            launch_opts = {"headless": True}
+            proxy_url = _settings.PROXY_URL.strip()
+            if proxy_url:
+                launch_opts["proxy"] = {"server": proxy_url}
+            browser = browser_type.launch(**launch_opts)
             context = browser.new_context(
                 viewport=VIEWPORT,
-                user_agent=random.choice(USER_AGENTS),
+                user_agent=random.choice(CHROME_USER_AGENTS or USER_AGENTS),
                 java_script_enabled=True,
             )
 

@@ -94,6 +94,7 @@ DEFAULT_SETTINGS = {
     "gemini_model": "gemini-2.5-flash",
     "supabase_url": "",
     "supabase_key": "",
+    "proxy_url": "",
 }
 
 
@@ -287,6 +288,7 @@ for key, default in [
     ("gemini_model", _loaded["gemini_model"]),
     ("supabase_url", _loaded["supabase_url"]),
     ("supabase_key", _loaded["supabase_key"]),
+    ("proxy_url", os.getenv("PROXY_URL") or _loaded["proxy_url"]),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -329,6 +331,13 @@ def build_planner() -> Planner | None:
     if not key:
         return None
     model = (st.session_state.get("gemini_model") or "gemini-2.5-flash").strip()
+    # Push proxy to env so downstream modules (renderer, stealth) can read it
+    # from config.settings.PROXY_URL without plumbing it through every call.
+    proxy = (st.session_state.get("proxy_url") or "").strip()
+    os.environ["PROXY_URL"] = proxy
+    # Reload the setting in config module so it picks up the new value
+    import config.settings as _cfg
+    _cfg.PROXY_URL = proxy
     return Planner(PlannerConfig(api_key=key, model=model))
 
 
@@ -512,6 +521,7 @@ with st.sidebar:
                 "output_format": format_input,
                 "supabase_url": st.session_state.supabase_url,
                 "supabase_key": st.session_state.supabase_key,
+                "proxy_url": st.session_state.proxy_url,
             })
 
         if st.session_state.ai_key:
@@ -544,11 +554,39 @@ with st.sidebar:
                 "output_format": st.session_state.output_format,
                 "supabase_url": sb_url,
                 "supabase_key": sb_key,
+                "proxy_url": st.session_state.proxy_url,
             })
         if sb_url and sb_key:
             st.success("Shared database connected")
         else:
             st.caption("Optional — scrape results are shared across all users.")
+
+    with st.expander("🛡️  Anti-Bot / Proxy", expanded=False):
+        proxy_input = st.text_input(
+            "Proxy URL",
+            value=st.session_state.proxy_url,
+            placeholder="socks5://user:pass@host:port",
+            help=(
+                "Optional HTTP or SOCKS5 proxy for bypassing anti-bot "
+                "protection on hard-to-scrape sites. Leave blank to "
+                "connect directly. Example: socks5://user:pass@host:1080"
+            ),
+            key="proxy_url_input",
+        )
+        if proxy_input != st.session_state.proxy_url:
+            st.session_state.proxy_url = proxy_input
+            save_settings({
+                "gemini_api_key": st.session_state.ai_key,
+                "gemini_model": st.session_state.gemini_model,
+                "output_format": st.session_state.output_format,
+                "supabase_url": st.session_state.supabase_url,
+                "supabase_key": st.session_state.supabase_key,
+                "proxy_url": proxy_input,
+            })
+        if proxy_input:
+            st.success("Proxy enabled")
+        else:
+            st.caption("Optional — most sites work without a proxy.")
 
     output_format = st.session_state.output_format  # used downstream
 

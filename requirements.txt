@@ -13,3 +13,4 @@ ddgs>=8.0.0
 pgeocode>=0.5.0
 streamlit>=1.30.0
 pandas>=2.0.0
+curl_cffi>=0.7.0
